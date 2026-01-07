@@ -3,6 +3,7 @@
 <head>
   <title>MoneyAssure Intraday Dashboard</title>
   <meta charset="utf-8">
+  <meta http-equiv="refresh" content="180">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -18,12 +19,14 @@
       <th>LTP</th>
       <th>%</th>
       <th>Volume (9:15)</th>
+      <th>9:15 %</th>
+      <th>10:00 %</th>
       <th>Total Vol</th>
     </tr>
 
     {% if data|length == 0 %}
       <tr>
-        <td colspan="5" class="empty">No stocks</td>
+        <td colspan="7" class="empty">No stocks</td>
       </tr>
     {% endif %}
 
@@ -38,17 +41,30 @@
         <td class="{{ 'green' if is_gainer else 'red' }}">{{ s.change }}%</td>
       {% endif %}
 
+      <td>{{ s.volume_fmt }}</td>
+
       <td>
-        {{ s.volume_fmt }}
-        {% if s.buy %}
-          <span class="yellow">🔥 BUY</span>
+        {% if is_gainer %}
+          {{ s.hl_pct.split('/')[0] }}
+        {% else %}
+          {{ s.hl_pct.split('/')[1] }}
+        {% endif %}
+      </td>
+
+      <td class="{{ 'green' if is_gainer else 'red' }}">
+        {% if is_gainer %}
+          {{ s.ten_am_high_pct }}%
+        {% else %}
+          {{ s.ten_am_low_pct }}%
         {% endif %}
       </td>
 
       <td>
         {{ s.total_volume_fmt }}
-        {% if s.big %}
-          <span class="yellow">🐘 BIG</span>
+        {% if s.big == "BUY" %}
+          <span class="green">🐘 BIG BUY</span>
+        {% elif s.big == "SELL" %}
+          <span class="red">🐘 BIG SELL</span>
         {% endif %}
       </td>
     </tr>
@@ -87,14 +103,12 @@
 <!-- ================= GAP UP / GAP DOWN ================= -->
 <div class="section">
   <h2>🚀 Gap Up / Gap Down</h2>
-  <p style="text-align:center; opacity:0.7; margin-top:-10px;">
-    Gap Up: <b class="green">≥ +1.5%</b> &nbsp; | &nbsp;
-    Gap Down: <b class="red">≤ -1.5%</b>
+  <p style="text-align:center; opacity:0.7;">
+    Gap Up ≥ +1.5% | Gap Down ≤ -1.5%
   </p>
-
   <div class="container">
-    {{ table("Gap Up (≥ +1.5%)", gap_up, true, true) }}
-    {{ table("Gap Down (≤ -1.5%)", gap_down, false, true) }}
+    {{ table("Gap Up", gap_up, true, true) }}
+    {{ table("Gap Down", gap_down, false, true) }}
   </div>
 </div>
 

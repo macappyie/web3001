@@ -2,6 +2,7 @@ from flask import Flask, render_template
 import pandas as pd
 from kiteconnect import KiteConnect
 from datetime import datetime, timedelta
+import time
 
 app = Flask(__name__)
 
@@ -44,8 +45,6 @@ def avg_volume_last_5_days(token):
 def index():
 
     rows = []
-    gap_up, gap_down = [], []
-    gap_symbols = set()
 
     today = datetime.now().date()
     yesterday = today - timedelta(days=1)
@@ -66,83 +65,112 @@ def index():
             ltp = q["last_price"]
             prev_close = q["ohlc"]["close"]
             change = round(((ltp - prev_close) / prev_close) * 100, 2)
-
             today_total_volume = q.get("volume", 0)
 
-            # ======= AVG 5 DAY VOLUME =======
-            avg_5d_vol = avg_volume_last_5_days(token)
-
-            big_player = (
-                avg_5d_vol > 0 and
-                today_total_volume >= 2 * avg_5d_vol
-            )
-
-            # ======= 5 MIN DATA =======
-            prev_5m = kite.historical_data(token, yesterday, yesterday, "5minute")
+            # ---------- HISTORICAL DATA ----------
             today_5m = kite.historical_data(token, today, today, "5minute")
+            if not today_5m:
+                continue
+
+            prev_5m = kite.historical_data(token, yesterday, yesterday, "5minute")
+            yday = kite.historical_data(token, yesterday, yesterday, "day")
+
+            time.sleep(0.35)  # rate-limit safety
 
             prev_last_5m_vol = prev_5m[-1]["volume"] if prev_5m else 0
-            today_first_5m_vol = today_5m[0]["volume"] if today_5m else 0
+            today_first_5m_vol = today_5m[0]["volume"]
 
-            buy_signal = (
+            avg_5d_vol = avg_volume_last_5_days(token)
+
+            # ================= 1️⃣ 9:15 AM INTRADAY LOGIC =================
+            high_915 = today_5m[0]["high"]
+            low_915 = today_5m[0]["low"]
+
+            high_pct = round(((high_915 - prev_close) / prev_close) * 100, 2)
+            low_pct = round(((low_915 - prev_close) / prev_close) * 100, 2)
+            hl_pct = f"{high_pct}% / {low_pct}%"
+
+            # ================= 2️⃣ 10:00 AM LOGIC =================
+            ten_am_high_pct = ""
+            ten_am_low_pct = ""
+
+            candles_till_10 = [
+                c for c in today_5m
+                if c["date"].time() <= datetime.strptime("10:00", "%H:%M").time()
+            ]
+
+            if candles_till_10:
+                high_10 = max(c["high"] for c in candles_till_10)
+                low_10 = min(c["low"] for c in candles_till_10)
+
+                ten_am_high_pct = round(((high_10 - prev_close) / prev_close) * 100, 2)
+                ten_am_low_pct = round(((low_10 - prev_close) / prev_close) * 100, 2)
+
+
+
+            # ================= 3️⃣ GAP UP / GAP DOWN (SEPARATE LOGIC) =================
+            gap_type = None
+            gap_pct = None
+
+            if yday:
+                y = yday[-1]
+                open_915 = today_5m[0]["open"]
+                gap_pct = round(((open_915 - y["close"]) / y["close"]) * 100, 2)
+
+                if gap_pct >= 1.5 and open_915 > y["high"]:
+                    gap_type = "GAP UP"
+                elif gap_pct <= -1.5 and open_915 < y["low"]:
+                    gap_type = "GAP DOWN"
+
+            # ================= 4️⃣ BIG PLAYER LOGIC =================
+            big_type = None
+            if (
                 prev_last_5m_vol > 0 and
-                today_first_5m_vol >= 2 * prev_last_5m_vol
-            )
+                today_first_5m_vol >= 2 * prev_last_5m_vol and
+                avg_5d_vol > 0 and
+                today_total_volume >= 1.5 * avg_5d_vol
+            ):
+                if change > 0:
+                    big_type = "BUY"
+                elif change < 0:
+                    big_type = "SELL"
 
-            # ======= GAP LOGIC =======
-            if today_5m:
-                first = today_5m[0]
-
-                gap_up_pct = round(((first["high"] - prev_close) / prev_close) * 100, 2)
-                gap_dn_pct = round(((prev_close - first["low"]) / prev_close) * 100, 2)
-
-                if gap_up_pct >= 1.5:
-                    gap_symbols.add(symbol)
-                    gap_up.append({
-                        "symbol": symbol,
-                        "ltp": round(ltp, 2),
-                        "gap": gap_up_pct,
-                        "volume_fmt": format_volume(today_first_5m_vol),
-                        "total_volume_fmt": format_volume(today_total_volume),
-                        "buy": buy_signal,
-                        "big": big_player
-                    })
-
-                elif gap_dn_pct >= 1.5:
-                    gap_symbols.add(symbol)
-                    gap_down.append({
-                        "symbol": symbol,
-                        "ltp": round(ltp, 2),
-                        "gap": -gap_dn_pct,
-                        "volume_fmt": format_volume(today_first_5m_vol),
-                        "total_volume_fmt": format_volume(today_total_volume),
-                        "buy": False,
-                        "big": big_player
-                    })
-
+            # ================= FINAL ROW =================
             rows.append({
                 "symbol": symbol,
                 "ltp": round(ltp, 2),
                 "change": change,
                 "volume_fmt": format_volume(today_first_5m_vol),
+                "hl_pct": hl_pct,
+                "ten_am_high_pct": ten_am_high_pct,
+                "ten_am_low_pct": ten_am_low_pct,
                 "total_volume_fmt": format_volume(today_total_volume),
-                "buy": buy_signal,
-                "big": big_player
+                "big": big_type,
+                "gap": gap_pct,
+                "gap_type": gap_type
             })
 
         except Exception as e:
-            print("ERROR:", e)
-            continue
+            print("ERROR:", symbol, e)
 
     dfm = pd.DataFrame(rows)
-    df_range = dfm[~dfm.symbol.isin(gap_symbols)]
 
-    r1b = df_range[df_range.change >= 2].sort_values("change", ascending=False)
-    r1s = df_range[df_range.change <= -2].sort_values("change")
-    r2b = df_range[(df_range.change >= 1.5) & (df_range.change < 2)]
-    r2s = df_range[(df_range.change <= -1.5) & (df_range.change > -2)]
-    r3b = df_range[(df_range.change >= 0.8) & (df_range.change < 1.5)]
-    r3s = df_range[(df_range.change <= -0.8) & (df_range.change > -1.5)]
+    # ================= 🔥 KEY FIX: REMOVE GAP STOCKS FROM RANGES =================
+    range_df = dfm[dfm.gap_type.isnull()]
+
+    # ================= RANGES (INTRADAY ONLY) =================
+    r1b = range_df[range_df.change >= 2].sort_values("change", ascending=False)
+    r1s = range_df[range_df.change <= -2].sort_values("change")
+
+    r2b = range_df[(range_df.change >= 1.5) & (range_df.change < 2)].sort_values("change", ascending=False)
+    r2s = range_df[(range_df.change <= -1.5) & (range_df.change > -2)].sort_values("change")
+
+    r3b = range_df[(range_df.change >= 0.8) & (range_df.change < 1.5)].sort_values("change", ascending=False)
+    r3s = range_df[(range_df.change <= -0.8) & (range_df.change > -1.5)].sort_values("change")
+
+    # ================= GAP SECTION =================
+    gap_up = dfm[dfm.gap_type == "GAP UP"]
+    gap_down = dfm[dfm.gap_type == "GAP DOWN"]
 
     return render_template(
         "index.html",
@@ -152,13 +180,12 @@ def index():
         r2s=r2s.to_dict("records"),
         r3b=r3b.to_dict("records"),
         r3s=r3s.to_dict("records"),
+        gap_up=gap_up.to_dict("records"),
+        gap_down=gap_down.to_dict("records"),
         r1b_count=len(r1b), r1s_count=len(r1s),
         r2b_count=len(r2b), r2s_count=len(r2s),
-        r3b_count=len(r3b), r3s_count=len(r3s),
-        gap_up=gap_up,
-        gap_down=gap_down
+        r3b_count=len(r3b), r3s_count=len(r3s)
     )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=3001, debug=True)
-
